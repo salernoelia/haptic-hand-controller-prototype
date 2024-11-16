@@ -110,6 +110,7 @@ void loop() {
         if (WiFi.getMode() & WIFI_AP) {
             M5.Display.printf("AP Mode\nSSID: %s\n", apSSID);
               M5.Display.println("PWD: " + String(apPassword) + "\n");
+              M5.Display.printf("IP: 192.168.4.1");
         } else {
             M5.Display.printf("IP: %s\n", WiFi.localIP().toString().c_str());
         }
