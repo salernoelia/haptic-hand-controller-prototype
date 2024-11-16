@@ -352,8 +352,6 @@ void startAP() {
     IPAddress IP = WiFi.softAPIP();
     Serial.print("AP IP address: ");
     Serial.println(IP);
-
-    // Optionally, you can set up a captive portal or display AP info
 }
 
 // Function to reconnect WiFi (not used in this version, kept for reference)
