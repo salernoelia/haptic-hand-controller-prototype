@@ -75,7 +75,7 @@ void setup() {
     M5.Display.setTextColor(WHITE);
     M5.Display.setTextDatum(middle_center);
     M5.Display.setTextFont(&fonts::Orbitron_Light_24);
-    M5.Display.setTextSize(1);
+    M5.Display.setTextSize(0.5);
 
     // Initialize Vibration Motor
     pinMode(vibrationPin, OUTPUT);
@@ -86,6 +86,7 @@ void setup() {
         M5.Display.setCursor(10, 10);
         M5.Display.println("AP Mode");
         M5.Display.println("SSID: " + String(apSSID));
+      
     } else if (WiFi.getMode() & WIFI_STA) {
         M5.Display.setCursor(10, 10);
         M5.Display.println("Station Mode");
@@ -108,6 +109,7 @@ void loop() {
         M5.Display.setCursor(10, 10);
         if (WiFi.getMode() & WIFI_AP) {
             M5.Display.printf("AP Mode\nSSID: %s\n", apSSID);
+              M5.Display.println("PWD: " + String(apPassword) + "\n");
         } else {
             M5.Display.printf("IP: %s\n", WiFi.localIP().toString().c_str());
         }
@@ -159,7 +161,7 @@ void loop() {
         M5.Power.powerOff();
     }
 
-    delay(50);
+    delay(100);
 }
 
 // Function to load configuration from SPIFFS
