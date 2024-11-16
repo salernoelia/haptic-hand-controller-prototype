@@ -1,7 +1,9 @@
 #include "M5StickCPlus2.h"
+#include "M5Unified.h"
 #include <OSCMessage.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+
 
 const char* ssid = "Snibs";        // Replace with your network SSID
 const char* password = "Sunnyvase086"; // Replace with your network password
@@ -79,6 +81,15 @@ void loop() {
         Serial.println("A Btn Released");
         setVibration(false); // Turn off vibration
     }
+
+     // Button B shuts down the device
+    if (M5.BtnC.wasPressed()) {
+        Serial.println("C Btn Pressed - Shutting Down");
+        M5.Power.powerOff(); // Correct function call
+
+    }
+
+    
 
     delay(100); // Delay to avoid flooding OSC messages
 }
