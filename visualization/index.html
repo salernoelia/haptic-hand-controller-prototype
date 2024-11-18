@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>3D Direction Pointer</title>
+    <style>
+        body { margin: 0; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Scene setup
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        camera.position.x = 5;
+        const renderer = new THREE.WebGLRenderer();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Add axes helper
+        const axesHelper = new THREE.AxesHelper(5);
+        scene.add(axesHelper);
+
+        // Create an arrow to represent direction
+        const arrowGeometry = new THREE.ConeGeometry(0.2, 1, 32);
+        const arrowMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        const arrow = new THREE.Mesh(arrowGeometry, arrowMaterial);
+        arrow.rotation.x = Math.PI / 2; // Pointing upwards initially
+        scene.add(arrow);
+
+        camera.position.z = 5;
+
+        // WebSocket Setup
+        const ws = new WebSocket('ws://192.168.1.113:8080'); // Replace YOUR_SERVER_IP with your server's IP
+
+        ws.onopen = () => {
+            console.log("Connected to WebSocket Server");
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.theta !== undefined && data.phi !== undefined) {
+                    const theta = parseFloat(data.theta);
+                    const phi = parseFloat(data.phi);
+                    console.log(`Orientation - Theta: ${theta.toFixed(2)}, Phi: ${phi.toFixed(2)}`);
+
+                    // Convert degrees to radians
+                    const thetaRad = THREE.MathUtils.degToRad(theta);
+                    const phiRad = THREE.MathUtils.degToRad(phi);
+
+                    // Apply rotations
+                    arrow.rotation.x = thetaRad;
+                    arrow.rotation.z = phiRad;
+                }
+            } catch (error) {
+                console.error("Error parsing WebSocket message:", error);
+            }
+        };
+
+        ws.onclose = () => {
+            console.log("WebSocket connection closed");
+        };
+
+        ws.onerror = (error) => {
+            console.error("WebSocket error:", error);
+        };
+
+        // Render loop
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Optional: Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

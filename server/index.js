@@ -1,7 +1,7 @@
+// server.js
 const osc = require("osc");
-const fs = require("fs");
+const WebSocket = require("ws");
 const { log } = require("console");
-let oscServerConnectionEstablished = false;
 
 // OSC Server setup for receiving messages
 const oscServer = new osc.UDPPort({
@@ -11,78 +11,63 @@ const oscServer = new osc.UDPPort({
 
 // OSC Client setup for sending messages
 const oscClient = new osc.UDPPort({
-  remoteAddress: "192.168.1.118",
+  remoteAddress: "192.168.1.118", // Update to ESP32's IP if necessary
   remotePort: 50001,
   localAddress: "0.0.0.0",
 });
 
-// Function to log incoming OSC messages to signals.json
-const logMessageToFile = (message) => {
-  const logEntry = {
-    timestamp: new Date().toISOString(),
-    address: message.address,
-    args: message.args.map((arg) =>
-      arg.value !== undefined ? arg.value : arg
-    ), // Flatten args to simple values
-  };
+// Start OSC Server
+oscServer.on("ready", () => {
+  console.log("OSC Server is listening on port 50002");
+});
 
-  // Convert the log entry to a JSON string with a newline for separation
-  const logEntryString = JSON.stringify(logEntry) + "\n";
+// Initialize WebSocket Server
+const wss = new WebSocket.Server({ port: 8080 });
+console.log("WebSocket Server is listening on port 8080");
 
-  if (logEntry.address !== "/gyro") {
-    return;
+// Broadcast function to send data to all connected clients
+wss.broadcast = function broadcast(data) {
+  wss.clients.forEach(function each(client) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(data);
+    }
+  });
+};
+
+// Handle incoming OSC messages
+oscServer.on("message", (oscMessage) => {
+  try {
+    console.log("OSC message received:", oscMessage);
+
+    // Handle orientation data
+    if (oscMessage.address === "/orientation") {
+      const [theta, phi] = oscMessage.args;
+      console.log(`Orientation - Theta: ${theta.toFixed(2)}, Phi: ${phi.toFixed(2)}`);
+
+      // Create a JSON object to send to WebSocket clients
+      const orientationData = JSON.stringify({ theta, phi });
+      wss.broadcast(orientationData);
+    }
+
+    // Handle other OSC messages as needed
+    if (oscMessage.address === "/vibrate") {
+      const vibrateState = oscMessage.args[0].value;
+      console.log(`Vibrate: ${vibrateState}`);
+      // Implement vibration logic or relay it to connected devices if needed
+    }
+  } catch (error) {
+    console.error("Error processing OSC message:", error);
   }
+});
 
-  // Append the new log entry to signals.json
-  fs.appendFile("signals.json", logEntryString, (err) => {
-    if (err) {
-      console.error("Error writing to signals.json:", err);
-    } else {
-      console.log("OSC message logged to signals.json");
-    }
-  });
-};
+// Open OSC Server
+oscServer.open();
 
-// Initialize OSC Server to receive messages
-const startOSCServer = () => {
-  oscServer.on("message", (oscMessage) => {
-    try {
-      console.log("OSC message received:", oscMessage);
-      logMessageToFile(oscMessage);
-    } catch (error) {
-      console.error("Error processing OSC message:", error);
-    }
-  });
-  oscServer.open();
-};
+// Open OSC Client
+oscClient.open();
 
-// Initialize OSC Client to send a message
-const sendOSCMessage = () => {
-  oscClient.open();
-
-  oscClient.on("ready", () => {
-    console.log("OSC Client ready to send messages");
-    oscServerConnectionEstablished = true;
-
-    sendVibrateSignal(100);
-
-    //wait 1s
-    setTimeout(() => {
-      sendVibrateSignal(200);
-    }, 500);
-  });
-};
-
+// Function to send vibrate signal via OSC
 const sendVibrateSignal = (duration) => {
-  if (!oscServerConnectionEstablished) {
-    console.error("OSC Server connection not established");
-    return;
-  }
-
-  if (!duration) {
-    duration = 100;
-  }
-
   oscClient.send({
     address: "/vibrate",
     args: [
@@ -106,6 +91,19 @@ const sendVibrateSignal = (duration) => {
   }, duration);
 };
 
-// Start the server and send a message
-startOSCServer();
-sendOSCMessage();
+// Example: Listen for WebSocket client messages to trigger vibration
+wss.on("connection", (ws) => {
+  console.log("WebSocket client connected");
+
+  ws.on("message", (message) => {
+    console.log("Received from client:", message);
+    // Example: Trigger vibration based on client command
+    if (message === "vibrate") {
+      sendVibrateSignal(100); // Vibrate for 100 ms
+    }
+  });
+
+  ws.on("close", () => {
+    console.log("WebSocket client disconnected");
+  });
+});

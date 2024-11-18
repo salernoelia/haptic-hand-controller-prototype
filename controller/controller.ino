@@ -1,3 +1,8 @@
+// controller.ino
+
+#define I2C_SDA_PIN 21
+#define I2C_SCL_PIN 22
+
 #include "M5StickCPlus2.h"
 #include "M5Unified.h"
 #include <OSCMessage.h>
@@ -6,6 +11,11 @@
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
+#include <MPU6886.h> // Added MPU6886 library
+
+// Initialize UDP and Web Server
+WiFiUDP udp;
+AsyncWebServer server(80);
 
 // Default Configuration
 struct Config {
@@ -14,14 +24,12 @@ struct Config {
     IPAddress oscAddress = IPAddress(192, 168, 1, 92);
     int oscPort = 50002;
     int localPort = 50001;
+
+    // Gyroscope Offsets
+    float gyroOffsetX = 0.0;
+    float gyroOffsetY = 0.0;
+    float gyroOffsetZ = 0.0;
 } config;
-
-// File path for configuration
-const char* configPath = "/config.json";
-
-// Initialize UDP and Web Server
-WiFiUDP udp;
-AsyncWebServer server(80);
 
 // Function Declarations
 bool loadConfig();
@@ -33,12 +41,36 @@ void handleStatus(AsyncWebServerRequest *request);
 bool connectToWiFi();
 void startAP();
 void reconnectWiFi();
+void checkForOSC();
+void setVibration(bool vibrationState);
+void calibrateGyro();
 
 // AP Credentials
 const char* apSSID = "M5Stick_Config";
 const char* apPassword = "config123"; // Change as needed
 
 const int vibrationPin = 26; // Vibration motor pin
+
+// Calibration Parameters
+const int calibrationSampleCount = 500; // Number of samples for calibration
+const int calibrationDelay = 10; // Delay between samples in milliseconds
+
+// Gyro Offsets (initialized from config)
+float gyroOffsetX = 0.0;
+float gyroOffsetY = 0.0;
+float gyroOffsetZ = 0.0;
+
+// Orientation variables (theta and phi from example)
+float theta = 0.0;
+float phi = 0.0;
+
+// MPU6886 Initialization
+MPU6886 imu;
+
+// Variables for calibration
+double sumX = 0.0;
+double sumY = 0.0;
+double sumZ = 0.0;
 
 void setup() {
     // Initialize Serial for debugging
@@ -56,6 +88,15 @@ void setup() {
         saveConfig(); // Save default config if loading fails
     }
 
+    // Assign gyro offsets from config
+    gyroOffsetX = config.gyroOffsetX;
+    gyroOffsetY = config.gyroOffsetY;
+    gyroOffsetZ = config.gyroOffsetZ;
+
+    // Initialize Wire1
+    Wire1.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Serial.println("Wire1 initialized.");
+
     // Attempt to connect to WiFi
     if (!connectToWiFi()) {
         Serial.println("Failed to connect to WiFi. Starting Access Point...");
@@ -64,6 +105,7 @@ void setup() {
 
     // Initialize UDP for OSC
     udp.begin(config.localPort);
+    Serial.println("UDP started.");
 
     // Setup Web Server
     setupWebServer();
@@ -82,15 +124,36 @@ void setup() {
     digitalWrite(vibrationPin, LOW);
 
     // Display Mode
+    M5.Display.setCursor(10, 10);
     if (WiFi.getMode() & WIFI_AP) {
-        M5.Display.setCursor(10, 10);
         M5.Display.println("AP Mode");
         M5.Display.println("SSID: " + String(apSSID));
-      
     } else if (WiFi.getMode() & WIFI_STA) {
-        M5.Display.setCursor(10, 10);
         M5.Display.println("Station Mode");
         M5.Display.println("IP: " + WiFi.localIP().toString());
+    }
+
+    // Display current gyro offsets
+    M5.Display.println("Gyro Offsets:");
+    M5.Display.printf("X: %.4f\nY: %.4f\nZ: %.4f", gyroOffsetX, gyroOffsetY, gyroOffsetZ);
+    delay(3000); // Show initial offsets for 3 seconds
+
+    // Initialize MPU6886
+    Serial.println("Initializing MPU6886...");
+    if (imu.Init() != 0) { // Check if initialization was successful
+        Serial.println("Failed to initialize MPU6886");
+        M5.Display.clear();
+        M5.Display.setCursor(10, 10);
+        M5.Display.println("MPU6886 Init Failed");
+        while (1) { // Halt execution
+            delay(1000);
+        }
+    } else {
+        Serial.println("MPU6886 Initialized Successfully");
+        M5.Display.clear();
+        M5.Display.setCursor(10, 10);
+        M5.Display.println("MPU6886 Initialized");
+        delay(2000);
     }
 }
 
@@ -101,47 +164,95 @@ void loop() {
     M5.Display.clear();
 
     // Read IMU Data
-    if (M5.Imu.update()) {
-        auto data = M5.Imu.getImuData();
-        int vol = StickCP2.Power.getBatteryVoltage();
+    float accX, accY, accZ;
+    float gyroX, gyroY, gyroZ;
 
-        // Display Data
-        M5.Display.setCursor(10, 10);
-        if (WiFi.getMode() & WIFI_AP) {
-            M5.Display.printf("AP Mode\nSSID: %s\n", apSSID);
-              M5.Display.println("PWD: " + String(apPassword) + "\n");
-              M5.Display.printf("IP: 192.168.4.1");
-        } else {
-            M5.Display.printf("IP: %s\n", WiFi.localIP().toString().c_str());
-        }
-        M5.Display.printf("BAT: %dmV\n", vol);
-        M5.Display.printf("Accel: %.2f %.2f %.2f\n", data.accel.x, data.accel.y, data.accel.z);
-        M5.Display.printf("Gyro: %.2f %.2f %.2f", data.gyro.x, data.gyro.y, data.gyro.z);
+    // Retrieve accelerometer and gyroscope data
+    imu.getAccelData(&accX, &accY, &accZ);
+    imu.getGyroData(&gyroX, &gyroY, &gyroZ);
 
-        // Send accelerometer data via OSC
-        OSCMessage msgAccel("/accel");
-        msgAccel.add(data.accel.x).add(data.accel.y).add(data.accel.z);
-
-        // Begin the UDP packet to the specified address and port
-        udp.beginPacket(config.oscAddress, config.oscPort);
-        // Send the OSC message through the UDP packet
-        msgAccel.send(udp); 
-        // End the UDP packet and send it
-        udp.endPacket();
-        msgAccel.empty();
-
-        // Send gyroscope data via OSC
-        OSCMessage msgGyro("/gyro");
-        msgGyro.add(data.gyro.x).add(data.gyro.y).add(data.gyro.z);
-
-        // Begin the UDP packet to the specified address and port
-        udp.beginPacket(config.oscAddress, config.oscPort);
-        // Send the OSC message through the UDP packet
-        msgGyro.send(udp); 
-        // End the UDP packet and send it
-        udp.endPacket();
-        msgGyro.empty();
+    // Debugging: Check if data is valid
+    if (accX == 0.0 && accY == 0.0 && accZ == 0.0 &&
+        gyroX == 0.0 && gyroY == 0.0 && gyroZ == 0.0) {
+        Serial.println("IMU Data is all zeros. Check connections.");
     }
+
+    // Apply gyro calibration offsets
+    float calibratedGyroX = gyroX - gyroOffsetX;
+    float calibratedGyroY = gyroY - gyroOffsetY;
+    float calibratedGyroZ = gyroZ - gyroOffsetZ;
+
+    // Calculate theta and phi as in the example
+    if ((accX < 1) && (accX > -1)) {
+        theta = asin(-accX) * 57.295; // Convert to degrees
+    }
+    if (accZ != 0) {
+        phi = atan(accY / accZ) * 57.295; // Convert to degrees
+    }
+
+    // Apply simple low-pass filter (alpha = 0.2)
+    float alpha = 0.2;
+    static float last_theta = 0.0;
+    static float last_phi = 0.0;
+    theta = alpha * theta + (1 - alpha) * last_theta;
+    phi = alpha * phi + (1 - alpha) * last_phi;
+    last_theta = theta;
+    last_phi = phi;
+
+    // Read battery voltage
+    int vol = StickCP2.Power.getBatteryVoltage();
+
+    // Display Data
+    M5.Display.setCursor(10, 10);
+    if (WiFi.getMode() & WIFI_AP) {
+        M5.Display.printf("AP Mode\nSSID: %s\n", apSSID);
+        M5.Display.println("PWD: " + String(apPassword) + "\n");
+        M5.Display.printf("IP: 192.168.4.1");
+    } else {
+        M5.Display.printf("IP: %s\n", WiFi.localIP().toString().c_str());
+    }
+    M5.Display.printf("BAT: %dmV\n", vol);
+    M5.Display.printf("Accel: %.2f %.2f %.2f\n", accX, accY, accZ);
+    M5.Display.printf("Gyro: %.2f %.2f %.2f\n", calibratedGyroX, calibratedGyroY, calibratedGyroZ);
+    M5.Display.printf("Orientation:\nTheta: %.2f\nPhi: %.2f", theta, phi);
+
+    // Send accelerometer data via OSC
+    OSCMessage msgAccel("/accel");
+    msgAccel.add(accX).add(accY).add(accZ);
+
+    // Begin the UDP packet to the specified address and port
+    udp.beginPacket(config.oscAddress, config.oscPort);
+    // Send the OSC message through the UDP packet
+    msgAccel.send(udp); 
+    // End the UDP packet and send it
+    udp.endPacket();
+    msgAccel.empty();
+
+    // Send gyroscope data via OSC
+    OSCMessage msgGyro("/gyro");
+    msgGyro.add(calibratedGyroX).add(calibratedGyroY).add(calibratedGyroZ);
+
+    // Begin the UDP packet to the specified address and port
+    udp.beginPacket(config.oscAddress, config.oscPort);
+    // Send the OSC message through the UDP packet
+    msgGyro.send(udp); 
+    // End the UDP packet and send it
+    udp.endPacket();
+    msgGyro.empty();
+
+    // Send orientation data via OSC
+    OSCMessage msgOrient("/orientation");
+    msgOrient.add(theta).add(phi); // Removed yaw as it's not calculated
+
+    udp.beginPacket(config.oscAddress, config.oscPort);
+    msgOrient.send(udp);
+    udp.endPacket();
+    msgOrient.empty();
+
+    // Print data to Serial for debugging
+    Serial.printf("Accel: %.2f, %.2f, %.2f\n", accX, accY, accZ);
+    Serial.printf("Gyro: %.2f, %.2f, %.2f\n", calibratedGyroX, calibratedGyroY, calibratedGyroZ);
+    Serial.printf("Orientation: Theta=%.2f, Phi=%.2f\n", theta, phi);
 
     // Check for OSC Messages
     checkForOSC();
@@ -156,6 +267,12 @@ void loop() {
         setVibration(false);
     }
 
+    // Button B for Gyro Calibration
+    if (M5.BtnB.wasPressed()) {
+        Serial.println("B Btn Pressed - Starting Gyro Calibration");
+        calibrateGyro();
+    }
+
     // Button C to Shutdown
     if (M5.BtnC.wasPressed()) {
         Serial.println("C Btn Pressed - Shutting Down");
@@ -165,223 +282,7 @@ void loop() {
     delay(100);
 }
 
-// Function to load configuration from SPIFFS
-bool loadConfig() {
-    if (!SPIFFS.exists(configPath)) {
-        Serial.println("Config file does not exist");
-        return false;
-    }
-
-    File file = SPIFFS.open(configPath, "r");
-    if (!file) {
-        Serial.println("Failed to open config file");
-        return false;
-    }
-
-    size_t size = file.size();
-    if (size > 1024) {
-        Serial.println("Config file size is too large");
-        file.close();
-        return false;
-    }
-
-    // Allocate buffer
-    std::unique_ptr<char[]> buf(new char[size + 1]);
-    file.readBytes(buf.get(), size);
-    buf[size] = '\0';
-    file.close();
-
-    // Parse JSON
-    DynamicJsonDocument doc(1024);
-    auto error = deserializeJson(doc, buf.get());
-    if (error) {
-        Serial.println("Failed to parse config file");
-        return false;
-    }
-
-    // Assign to config
-    config.ssid = doc["ssid"].as<String>();
-    config.password = doc["password"].as<String>();
-    String oscIP = doc["oscAddress"].as<String>();
-    config.oscAddress.fromString(oscIP);
-    config.oscPort = doc["oscPort"].as<int>();
-    config.localPort = doc["localPort"].as<int>();
-
-    Serial.println("Configuration loaded:");
-    Serial.println(doc.as<String>());
-
-    return true;
-}
-
-// Function to save configuration to SPIFFS
-bool saveConfig() {
-    DynamicJsonDocument doc(1024);
-    doc["ssid"] = config.ssid;
-    doc["password"] = config.password;
-    doc["oscAddress"] = config.oscAddress.toString();
-    doc["oscPort"] = config.oscPort;
-    doc["localPort"] = config.localPort;
-
-    File file = SPIFFS.open(configPath, "w");
-    if (!file) {
-        Serial.println("Failed to open config file for writing");
-        return false;
-    }
-
-    if (serializeJson(doc, file) == 0) {
-        Serial.println("Failed to write to config file");
-        file.close();
-        return false;
-    }
-
-    file.close();
-    Serial.println("Configuration saved");
-    return true;
-}
-
-// Function to setup the web server
-void setupWebServer() {
-    // Serve Configuration Form
-    server.on("/", HTTP_GET, handleRoot);
-
-    // Handle Form Submission
-    server.on("/configure", HTTP_POST, handleConfig);
-
-    // Serve Status Page
-    server.on("/status", HTTP_GET, handleStatus);
-
-    // Start Server
-    server.begin();
-    Serial.println("Web server started");
-}
-
-// Handler for root (configuration form)
-void handleRoot(AsyncWebServerRequest *request) {
-    String html = "<!DOCTYPE html><html><head><title>Configuration</title></head><body>";
-    html += "<h2>Configure Device</h2>";
-    html += "<form action='/configure' method='post'>";
-    html += "WiFi SSID:<br><input type='text' name='ssid' value='" + config.ssid + "' required><br>";
-    html += "WiFi Password:<br><input type='password' name='password' value='" + config.password + "' required><br>";
-    html += "OSC IP Address:<br><input type='text' name='oscAddress' value='" + config.oscAddress.toString() + "' required><br>";
-    html += "OSC Port:<br><input type='number' name='oscPort' value='" + String(config.oscPort) + "' required><br>";
-    html += "Listening Port:<br><input type='number' name='localPort' value='" + String(config.localPort) + "' required><br><br>";
-    html += "<input type='submit' value='Save'>";
-    html += "</form></body></html>";
-
-    request->send(200, "text/html", html);
-}
-
-// Handler for configuration form submission
-void handleConfig(AsyncWebServerRequest *request) {
-    // Check if all required parameters are present
-    if (request->hasParam("ssid", true) && request->hasParam("password", true) &&
-        request->hasParam("oscAddress", true) && request->hasParam("oscPort", true) &&
-        request->hasParam("localPort", true)) {
-
-        config.ssid = request->getParam("ssid", true)->value();
-        config.password = request->getParam("password", true)->value();
-        String oscIP = request->getParam("oscAddress", true)->value();
-        config.oscAddress.fromString(oscIP);
-        config.oscPort = request->getParam("oscPort", true)->value().toInt();
-        config.localPort = request->getParam("localPort", true)->value().toInt();
-
-        // Save configuration
-        if (saveConfig()) {
-            // Send response before restarting
-            request->send(200, "text/html", "<!DOCTYPE html><html><head><title>Success</title></head><body><h2>Configuration Saved. Rebooting...</h2></body></html>");
-
-            // Allow time for response to be sent
-            delay(1000);
-
-            // Restart device to apply new settings
-            ESP.restart();
-            return;
-        } else { 
-            request->send(500, "text/plain", "Failed to save configuration");
-            return;
-        }
-    }
-
-    // Missing parameters
-    request->send(400, "text/plain", "Bad Request: Missing Parameters");
-}
-
-// Handler for status page
-void handleStatus(AsyncWebServerRequest *request) {
-    DynamicJsonDocument doc(1024);
-    doc["ssid"] = config.ssid;
-    doc["password"] = config.password;
-    doc["oscAddress"] = config.oscAddress.toString();
-    doc["oscPort"] = config.oscPort;
-    doc["localPort"] = config.localPort;
-
-    String json;
-    serializeJsonPretty(doc, json);
-    request->send(200, "application/json", json);
-}
-
-// Function to connect to WiFi in Station Mode
-bool connectToWiFi() {
-    Serial.print("Connecting to WiFi SSID: ");
-    Serial.println(config.ssid);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(config.ssid.c_str(), config.password.c_str());
-
-    // Attempt to connect for 10 seconds
-    unsigned long startAttemptTime = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
-        delay(500);
-        Serial.print(".");
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nConnected to WiFi");
-        Serial.print("IP Address: ");
-        Serial.println(WiFi.localIP());
-        return true;
-    } else {
-        Serial.println("\nFailed to connect to WiFi");
-        return false;
-    }
-}
-
-// Function to start Access Point
-void startAP() {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(apSSID, apPassword);
-
-    IPAddress IP = WiFi.softAPIP();
-    Serial.print("AP IP address: ");
-    Serial.println(IP);
-}
-
-// Function to reconnect WiFi (not used in this version, kept for reference)
-void reconnectWiFi() {
-    // This function can be used to attempt reconnection if needed
-}
-
 // Function to control the vibration motor
 void setVibration(bool vibrationState) {
     digitalWrite(vibrationPin, vibrationState ? HIGH : LOW);
-}
-
-// Function to check for incoming OSC messages
-void checkForOSC() {
-    OSCMessage msg;
-    int size = udp.parsePacket();
-    while (size--) {
-        msg.fill(udp.read());
-    }
-    if (!msg.hasError()) {
-        if (msg.match("/vibrate")) {
-            int vibrationCommand = msg.getInt(0);
-            if (vibrationCommand == 1) {
-                setVibration(true);
-                Serial.println("Vibration ON (from OSC)");
-            } else if (vibrationCommand == 0) {
-                setVibration(false);
-                Serial.println("Vibration OFF (from OSC)");
-            }
-        }
-    }
 }
