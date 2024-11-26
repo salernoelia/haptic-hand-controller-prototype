@@ -1,6 +1,6 @@
 # Haptic Hand Controller
 
-Authors: Ege Seçgin, Elia Salerno
+Author: Elia Salerno
 
 This is a project done for the M5StickC Plus 2 ESP32 based microcontroller, that sets-up a gyro+accelerometer based hand controller and transmits the controller data via OSC.
 
